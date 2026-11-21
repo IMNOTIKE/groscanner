@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spesa Eurospin</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f4f4f4; color: #222; }
+  header { position: sticky; top: 0; background: #0a5bd3; color: #fff; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; z-index: 5; }
+  header .total { font-size: 28px; font-weight: 700; }
+  main { padding: 12px; max-width: 520px; margin: 0 auto; }
+  video { width: 100%; border-radius: 12px; background: #000; max-height: 45vh; object-fit: cover; }
+  button { font-size: 17px; padding: 12px 16px; border: 0; border-radius: 10px; background: #0a5bd3; color: #fff; margin: 6px 4px 6px 0; }
+  button.secondary { background: #666; }
+  button.danger { background: #c62828; }
+  .card { background: #fff; border-radius: 12px; padding: 12px; margin-top: 12px; }
+  label { display: block; font-size: 13px; color: #555; margin-top: 8px; }
+  input { width: 100%; font-size: 18px; padding: 10px; border: 1px solid #bbb; border-radius: 8px; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; }
+  li .name { flex: 1; padding-right: 8px; }
+  li .price { font-weight: 600; margin-right: 8px; }
+  li button { padding: 6px 10px; font-size: 14px; background: #c62828; margin: 0; }
+  #status { font-size: 14px; color: #555; margin-top: 6px; min-height: 20px; }
+  #raw { font-size: 12px; color: #888; white-space: pre-wrap; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <div>Totale<br><span class="total" id="total">0,00 €</span></div>
+  <div id="count">0 articoli</div>
+</header>
+<main>
+  <video id="video" autoplay playsinline muted></video>
+  <div>
+    <button id="startBtn">Start camera</button>
+    <button id="scanBtn" disabled>Scan tag</button>
+  </div>
+  <div id="status"></div>
+
+  <div class="card" id="confirmCard" style="display:none">
+    <strong>Check and confirm</strong>
+    <label for="nameInput">Product</label>
+    <input id="nameInput" type="text">
+    <label for="priceInput">Price (€)</label>
+    <input id="priceInput" type="text" inputmode="decimal">
+    <label for="qtyInput">Quantity</label>
+    <input id="qtyInput" type="number" min="1" value="1" inputmode="numeric">
+    <div>
+      <button id="addBtn">Add</button>
+      <button id="cancelBtn" class="secondary">Cancel</button>
+    </div>
+    <div id="raw"></div>
+  </div>
+
+  <div class="card">
+    <strong>Your shopping</strong>
+    <ul id="list"></ul>
+    <button id="manualBtn" class="secondary">Add manually</button>
+    <button id="clearBtn" class="danger">Clear all</button>
+  </div>
+</main>
+
+<script>
+(function () {
+  var video = document.getElementById('video');
+  var startBtn = document.getElementById('startBtn');
+  var scanBtn = document.getElementById('scanBtn');
+  var statusEl = document.getElementById('status');
+  var confirmCard = document.getElementById('confirmCard');
+  var nameInput = document.getElementById('nameInput');
+  var priceInput = document.getElementById('priceInput');
+  var qtyInput = document.getElementById('qtyInput');
+  var rawEl = document.getElementById('raw');
+  var listEl = document.getElementById('list');
+  var totalEl = document.getElementById('total');
+  var countEl = document.getElementById('count');
+
+  var items = JSON.parse(localStorage.getItem('spesa') || '[]');
+  var stream = null;
+  var worker = null;
+
+  function fmt(n) { return n.toFixed(2).replace('.', ',') + ' €'; }
+  function save() { localStorage.setItem('spesa', JSON.stringify(items)); }
+
+  function render() {
+    listEl.innerHTML = '';
+    var total = 0, count = 0;
+    items.forEach(function (it, i) {
+      total += it.price * it.qty;
+      count += it.qty;
+      var li = document.createElement('li');
+      var name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = (it.qty > 1 ? it.qty + ' x ' : '') + it.name;
+      var price = document.createElement('span');
+      price.className = 'price';
+      price.textContent = fmt(it.price * it.qty);
+      var del = document.createElement('button');
+      del.textContent = 'X';
+      del.onclick = function () { items.splice(i, 1); save(); render(); };
+      li.appendChild(name); li.appendChild(price); li.appendChild(del);
+      listEl.appendChild(li);
+    });
+    totalEl.textContent = fmt(total);
+    countEl.textContent = count + (count === 1 ? ' articolo' : ' articoli');
+  }
+
+  function parsePrice(text) {
+    // find numbers like 1,29 or 1.29 or 12,90
+    var matches = text.replace(/[Oo]/g, '0').match(/\d{1,3}[.,]\d{2}/g);
+    if (!matches) return null;
+    var values = matches.map(function (m) { return parseFloat(m.replace(',', '.')); });
+    // shelf tags usually show the main price biggest; as a guess take the first one
+    // that is not obviously a price per kg line (we cannot know), so offer the first.
+    return values[0];
+  }
+
+  function parseName(text) {
+    var lines = text.split('\n').map(function (l) { return l.trim(); }).filter(function (l) {
+      return l.length > 2 && /[A-Za-z]{3,}/.test(l);
+    });
+    return lines.length ? lines[0] : '';
+  }
+
+  function showConfirm(name, price, raw) {
+    nameInput.value = name || '';
+    priceInput.value = price != null ? String(price).replace('.', ',') : '';
+    qtyInput.value = 1;
+    rawEl.textContent = raw ? 'Text read:\n' + raw : '';
+    confirmCard.style.display = 'block';
+    confirmCard.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  startBtn.onclick = function () {
+    statusEl.textContent = 'Starting camera...';
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+      .then(function (s) {
+        stream = s;
+        video.srcObject = s;
+        scanBtn.disabled = false;
+        statusEl.textContent = 'Camera ready. Point at a shelf tag and tap Scan tag.';
+      })
+      .catch(function (e) {
+        statusEl.textContent = 'Camera error: ' + e.message + ' (the page must be on HTTPS)';
+      });
+  };
+
+  scanBtn.onclick = function () {
+    if (!stream) return;
+    var canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    var ctx = canvas.getContext('2d');
+    ctx.filter = 'grayscale(1) contrast(1.4)';
+    ctx.drawImage(video, 0, 0);
+    scanBtn.disabled = true;
+    statusEl.textContent = 'Reading tag... the first time can take a little while.';
+    var p = worker ? Promise.resolve(worker) : Tesseract.createWorker('ita').then(function (w) { worker = w; return w; });
+    p.then(function (w) { return w.recognize(canvas); })
+      .then(function (res) {
+        var text = res.data.text || '';
+        statusEl.textContent = 'Done. Check the details below.';
+        showConfirm(parseName(text), parsePrice(text), text);
+      })
+      .catch(function (e) {
+        statusEl.textContent = 'Could not read the tag: ' + e.message;
+      })
+      .then(function () { scanBtn.disabled = false; });
+  };
+
+  document.getElementById('addBtn').onclick = function () {
+    var price = parseFloat(priceInput.value.replace(',', '.'));
+    var qty = parseInt(qtyInput.value, 10) || 1;
+    if (isNaN(price)) { statusEl.textContent = 'Please enter a valid price.'; return; }
+    items.push({ name: nameInput.value.trim() || 'Articolo', price: price, qty: qty });
+    save(); render();
+    confirmCard.style.display = 'none';
+    statusEl.textContent = 'Added. Scan the next one.';
+  };
+
+  document.getElementById('cancelBtn').onclick = function () {
+    confirmCard.style.display = 'none';
+  };
+
+  document.getElementById('manualBtn').onclick = function () {
+    showConfirm('', null, '');
+  };
+
+  document.getElementById('clearBtn').onclick = function () {
+    if (confirm('Clear the whole list?')) { items = []; save(); render(); }
+  };
+
+  render();
+})();
+</script>
+</body>
+</html>
